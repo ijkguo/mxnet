@@ -195,15 +195,16 @@ class ProposalOp : public Operator{
     index_t height = scores.size(2);
     index_t width = scores.size(3);
     index_t count = num_anchors * height * width;
+    index_t rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
 
     Tensor<cpu, 2> workspace_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
       Shape2(count, 5), s);
     Tensor<cpu, 2> workspace_ordered_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(param_.rpn_pre_nms_top_n, 5), s);
+      Shape2(rpn_pre_nms_top_n, 5), s);
     Tensor<cpu, 2> workspace_pre_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
       Shape2(2, count), s);
     Tensor<cpu, 2> workspace_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(3, param_.rpn_pre_nms_top_n), s);
+      Shape2(3, rpn_pre_nms_top_n), s);
 
     // Generate anchors
     std::vector<float> base_anchor(4);
@@ -246,7 +247,7 @@ class ProposalOp : public Operator{
                           order);
     utils::ReorderProposals(workspace_proposals,
                             order,
-                            param_.rpn_pre_nms_top_n,
+                            rpn_pre_nms_top_n,
                             workspace_ordered_proposals);
 
     real_t scale = im_info[0][2];

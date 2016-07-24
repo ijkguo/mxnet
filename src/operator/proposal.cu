@@ -352,13 +352,14 @@ class ProposalGPUOp : public Operator{
     index_t height = scores.size(2);
     index_t width = scores.size(3);
     index_t count = num_anchors * height * width;  // count of total anchors
+    index_t rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;  // set to -1 for max
 
     float* workspace_proposals_ptr = NULL;
     FRCNN_CUDA_CHECK(cudaMalloc(&workspace_proposals_ptr, sizeof(float) * count * 5));
     Tensor<xpu, 2> workspace_proposals(workspace_proposals_ptr, Shape2(count, 5));
     float* workspace_ordered_proposals_ptr = NULL;
-    FRCNN_CUDA_CHECK(cudaMalloc(&workspace_ordered_proposals_ptr, sizeof(float) * param_.rpn_pre_nms_top_n * 5));
-    Tensor<xpu, 2> workspace_ordered_proposals(workspace_ordered_proposals_ptr, Shape2(param_.rpn_pre_nms_top_n, 5));
+    FRCNN_CUDA_CHECK(cudaMalloc(&workspace_ordered_proposals_ptr, sizeof(float) * rpn_pre_nms_top_n * 5));
+    Tensor<xpu, 2> workspace_ordered_proposals(workspace_ordered_proposals_ptr, Shape2(rpn_pre_nms_top_n, 5));
     float* workspace_pre_nms_ptr = NULL;
     FRCNN_CUDA_CHECK(cudaMalloc(&workspace_pre_nms_ptr, sizeof(float) * count * 2));
     Tensor<xpu, 2> workspace_pre_nms(workspace_pre_nms_ptr, Shape2(2, count));
@@ -426,7 +427,7 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // Reorder proposals according to order
-    const int top_n = param_.rpn_pre_nms_top_n;
+    const int top_n = rpn_pre_nms_top_n;
     dimGrid.x = (top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
     CheckLaunchParam(dimGrid, dimBlock, "ReorderProposals");
     ReorderProposalsKernel<<<dimGrid, dimBlock>>>(
