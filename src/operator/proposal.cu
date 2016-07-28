@@ -142,7 +142,7 @@ template<typename Dtype>
 __global__ void CopyScoreKernel(const int count,
                                 const Dtype* dets,
                                 Dtype* score,
-                                Dtype* order) {
+                                int* order) {
   for (int index = blockIdx.x * blockDim.x + threadIdx.x;
        index < count;
        index += blockDim.x * gridDim.x) {
@@ -157,7 +157,7 @@ __global__ void CopyScoreKernel(const int count,
 template<typename Dtype>
 __global__ void ReorderProposalsKernel(const int count,
                                        const Dtype* prev_dets,
-                                       const Dtype* order,
+                                       const int* order,
                                        const int top_n,
                                        Dtype* dets) {
   for (int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -360,9 +360,12 @@ class ProposalGPUOp : public Operator{
     float* workspace_ordered_proposals_ptr = NULL;
     FRCNN_CUDA_CHECK(cudaMalloc(&workspace_ordered_proposals_ptr, sizeof(float) * rpn_pre_nms_top_n * 5));
     Tensor<xpu, 2> workspace_ordered_proposals(workspace_ordered_proposals_ptr, Shape2(rpn_pre_nms_top_n, 5));
-    float* workspace_pre_nms_ptr = NULL;
-    FRCNN_CUDA_CHECK(cudaMalloc(&workspace_pre_nms_ptr, sizeof(float) * count * 2));
-    Tensor<xpu, 2> workspace_pre_nms(workspace_pre_nms_ptr, Shape2(2, count));
+    float* score_ptr = NULL;
+    FRCNN_CUDA_CHECK(cudaMalloc(&score_ptr, sizeof(float) * count));
+    Tensor<xpu, 1> score(score_ptr, Shape1(count));
+    int* order_ptr = NULL;
+        FRCNN_CUDA_CHECK(cudaMalloc(&order_ptr, sizeof(int) * count));
+    Tensor<xpu, 1, int> order(order_ptr, Shape1(count));
 
     // Generate first anchors based on base anchor
     std::vector<float> base_anchor(4);
@@ -403,9 +406,6 @@ class ProposalGPUOp : public Operator{
       workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
-    Tensor<xpu, 1> score = workspace_pre_nms[0];
-    Tensor<xpu, 1> order = workspace_pre_nms[1];
-
     // filter boxes with less than rpn_min_size
     CheckLaunchParam(dimGrid, dimBlock, "FilterBox");
     FilterBoxKernel<<<dimGrid, dimBlock>>>(
@@ -427,7 +427,7 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // Reorder proposals according to order
-    const int top_n = rpn_pre_nms_top_n;
+    const int top_n = std::min(rpn_pre_nms_top_n, count);
     dimGrid.x = (top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
     CheckLaunchParam(dimGrid, dimBlock, "ReorderProposals");
     ReorderProposalsKernel<<<dimGrid, dimBlock>>>(
@@ -435,7 +435,8 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     FRCNN_CUDA_CHECK(cudaFree(workspace_proposals_ptr));
-    FRCNN_CUDA_CHECK(cudaFree(workspace_pre_nms_ptr));
+    FRCNN_CUDA_CHECK(cudaFree(score_ptr));
+    FRCNN_CUDA_CHECK(cudaFree(order_ptr));
 
     // perform nms
     std::vector<int> _keep(workspace_ordered_proposals.size(0));
