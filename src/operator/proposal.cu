@@ -466,6 +466,28 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaFree(workspace_ordered_proposals_ptr));
   }
 
+  virtual void Backward(const OpContext &ctx,
+                        const std::vector<TBlob> &out_grad,
+                        const std::vector<TBlob> &in_data,
+                        const std::vector<TBlob> &out_data,
+                        const std::vector<OpReqType> &req,
+                        const std::vector<TBlob> &in_grad,
+                        const std::vector<TBlob> &aux_states) {
+    using namespace mshadow;
+    using namespace mshadow::expr;
+    CHECK_EQ(in_grad.size(), 3);
+
+    Stream<xpu> *s = ctx.get_stream<xpu>();
+    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
+    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
+
+    // can not assume the grad would be zero
+    Assign(gscores, req[proposal::kClsProb], 0);
+    Assign(gbbox, req[proposal::kBBoxPred], 0);
+    Assign(ginfo, req[proposal::kImInfo], 0);
+  }
+
  private:
   ProposalParam param_;
 };  // class ProposalGPUOp
