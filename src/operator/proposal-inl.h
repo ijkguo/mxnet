@@ -266,26 +266,30 @@ class ProposalOp : public Operator{
 
     // fill in output rois
     for (index_t i = 0; i < out.size(0); ++i) {
-      index_t index = keep[i];
       //batch index 0
       out[i][0] = 0;
-      for (index_t j = 0; j < 4; ++j) {
-        if (i < out_size) {
+      if (i < out_size) {
+        index_t index = keep[i];
+        for (index_t j = 0; j < 4; ++j) {
           out[i][j + 1] =  workspace_ordered_proposals[index][j];
-        } else {
-          out[i][j + 1] = 0;
+        }
+      } else {
+        index_t index = keep[i % out_size];
+        for (index_t j = 0; j < 4; ++j) {
+          out[i][j + 1] = workspace_ordered_proposals[index][j];
         }
       }
     }
 
     // fill in output score
     for (index_t i = 0; i < out_score.size(0); i++) {
-      index_t index = keep[i];
       if (i < out_size) {
+        index_t index = keep[i];
         out_score[i][0] = workspace_ordered_proposals[index][4];
       }
       else {
-        out_score[i][0] = 0;
+        index_t index = keep[i % out_size];
+        out_score[i][0] = workspace_ordered_proposals[index][4];
       }
     }
   }
