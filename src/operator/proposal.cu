@@ -2,7 +2,7 @@
  * Copyright (c) 2015 by Contributors
  * \file proposal.cu
  * \brief Proposal Operator
- * \author Shaoqin Ren, Jian Guo
+ * \author Shaoqing Ren, Jian Guo
 */
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
@@ -73,6 +73,8 @@ __global__ void BBoxPredKernel(const int count,
                                const int num_anchors,
                                const int feat_height,
                                const int feat_width,
+                               const int real_height,
+                               const int real_width,
                                const float im_height,
                                const float im_width,
                                const Dtype* boxes,
@@ -114,6 +116,10 @@ __global__ void BBoxPredKernel(const int count,
     out_pred_boxes[index * 5 + 1] = pred_y1;
     out_pred_boxes[index * 5 + 2] = pred_x2;
     out_pred_boxes[index * 5 + 3] = pred_y2;
+
+    if (h >= real_height || w >= real_width) {
+      out_pred_boxes[index * 5 + 4] = -1.0f;
+    }
   }
 }
 
@@ -127,6 +133,8 @@ __global__ void IoUPredKernel(const int count,
                               const int num_anchors,
                               const int feat_height,
                               const int feat_width,
+                              const int real_height,
+                              const int real_width,
                               const float im_height,
                               const float im_width,
                               const Dtype* boxes,
@@ -158,6 +166,10 @@ __global__ void IoUPredKernel(const int count,
     out_pred_boxes[index * 5 + 1] = pred_y1;
     out_pred_boxes[index * 5 + 2] = pred_x2;
     out_pred_boxes[index * 5 + 3] = pred_y2;
+
+    if (h >= real_height || w >= real_width) {
+      out_pred_boxes[index * 5 + 4] = -1.0f;
+    }
   }
 }
 
@@ -438,15 +450,23 @@ class ProposalGPUOp : public Operator{
     cudaMemcpy(&cpu_im_info[0], im_info.dptr_, sizeof(float) * cpu_im_info.size(), cudaMemcpyDeviceToHost);
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
+    // prevent padded predictions
+    int real_height = static_cast<int>(cpu_im_info[0] / param_.feature_stride);
+    int real_width = static_cast<int>(cpu_im_info[1] / param_.feature_stride);
+    CHECK_GE(height, real_height) << height << " " << real_height << std::endl;
+    CHECK_GE(width, real_width) << width << " " << real_width << std::endl;
+
     // Transform anchors and bbox_deltas into bboxes
     CheckLaunchParam(dimGrid, dimBlock, "BBoxPred");
     if (param_.iou_loss) {
       IoUPredKernel<<<dimGrid, dimBlock>>>(
-        count, num_anchors, height, width, cpu_im_info[0], cpu_im_info[1],
+        count, num_anchors, height, width, real_height, real_width,
+        cpu_im_info[0], cpu_im_info[1],
         workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
     } else {
       BBoxPredKernel<<<dimGrid, dimBlock>>>(
-        count, num_anchors, height, width, cpu_im_info[0], cpu_im_info[1],
+        count, num_anchors, height, width, real_height, real_width,
+        cpu_im_info[0], cpu_im_info[1],
         workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
     }
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());

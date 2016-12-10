@@ -239,10 +239,18 @@ class ProposalOp : public Operator{
       }
     }
 
+    // prevent padded predictions
+    int real_height = static_cast<int>(im_info[0][0] / param_.feature_stride);
+    int real_width = static_cast<int>(im_info[0][1] / param_.feature_stride);
+    CHECK_GE(height, real_height) << height << " " << real_height << std::endl;
+    CHECK_GE(width, real_width) << width << " " << real_width << std::endl;
+
     if (param_.iou_loss) {
-      utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1], &(workspace_proposals));
+      utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1],
+                             real_height, real_width, &(workspace_proposals));
     } else {
-      utils::BBoxTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1], &(workspace_proposals));
+      utils::BBoxTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1],
+                              real_height, real_width, &(workspace_proposals));
     }
     utils::FilterBox(workspace_proposals, param_.rpn_min_size * im_info[0][2]);
 

@@ -75,16 +75,18 @@ inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
                              const mshadow::Tensor<cpu, 4>& deltas,
                              const float im_height,
                              const float im_width,
+                             const int real_height,
+                             const int real_width,
                              mshadow::Tensor<cpu, 2> *out_pred_boxes) {
   CHECK_GE(boxes.size(1), 4);
   CHECK_GE(out_pred_boxes->size(1), 4);
-  size_t anchors = deltas.size(1)/4;
-  size_t heights = deltas.size(2);
-  size_t widths = deltas.size(3);
+  int anchors = deltas.size(1)/4;
+  int heights = deltas.size(2);
+  int widths = deltas.size(3);
 
-  for (size_t a = 0; a < anchors; ++a) {
-    for (size_t h = 0; h < heights; ++h) {
-      for (size_t w = 0; w < widths; ++w) {
+  for (int a = 0; a < anchors; ++a) {
+    for (int h = 0; h < heights; ++h) {
+      for (int w = 0; w < widths; ++w) {
         index_t index = h * (widths * anchors) + w * (anchors) + a;
         float width = boxes[index][2] - boxes[index][0] + 1.0;
         float height = boxes[index][3] - boxes[index][1] + 1.0;
@@ -115,6 +117,10 @@ inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
         (*out_pred_boxes)[index][1] = pred_y1;
         (*out_pred_boxes)[index][2] = pred_x2;
         (*out_pred_boxes)[index][3] = pred_y2;
+
+        if (h >= real_height || w >= real_width) {
+          (*out_pred_boxes)[index][4] = -1.0;
+        }
       }
     }
   }
@@ -125,16 +131,18 @@ inline void IoUTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
                             const mshadow::Tensor<cpu, 4>& deltas,
                             const float im_height,
                             const float im_width,
+                            const int real_height,
+                            const int real_width,
                             mshadow::Tensor<cpu, 2> *out_pred_boxes) {
   CHECK_GE(boxes.size(1), 4);
   CHECK_GE(out_pred_boxes->size(1), 4);
-  size_t anchors = deltas.size(1)/4;
-  size_t heights = deltas.size(2);
-  size_t widths = deltas.size(3);
+  int anchors = deltas.size(1)/4;
+  int heights = deltas.size(2);
+  int widths = deltas.size(3);
 
-  for (size_t a = 0; a < anchors; ++a) {
-    for (size_t h = 0; h < heights; ++h) {
-      for (size_t w = 0; w < widths; ++w) {
+  for (int a = 0; a < anchors; ++a) {
+    for (int h = 0; h < heights; ++h) {
+      for (int w = 0; w < widths; ++w) {
         index_t index = h * (widths * anchors) + w * (anchors) + a;
         float x1 = boxes[index][0];
         float y1 = boxes[index][1];
@@ -160,6 +168,10 @@ inline void IoUTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
         (*out_pred_boxes)[index][1] = pred_y1;
         (*out_pred_boxes)[index][2] = pred_x2;
         (*out_pred_boxes)[index][3] = pred_y2;
+
+        if (h >= real_height || w >= real_width) {
+          (*out_pred_boxes)[index][4] = -1.0f;
+        }
       }
     }
   }
