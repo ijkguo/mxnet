@@ -21,7 +21,6 @@
 #include "./operator_common.h"
 #include "./mshadow_op.h"
 #include "./native_op-inl.h"
-#include "./rcnn_utils.h"
 #include "./proposal-inl.h"
 
 #define DIVUP(m,n) ((m) / (n) + ((m) % (n) > 0))

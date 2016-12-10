@@ -2,7 +2,7 @@
  * Copyright (c) 2015 by Contributors
  * \file proposal-inl.h
  * \brief Proposal Operator
- * \author Piotr Teterwak, Jian Guo
+ * \author Piotr Teterwak, Bing Xu, Jian Guo
 */
 #ifndef MXNET_OPERATOR_PROPOSAL_INL_H_
 #define MXNET_OPERATOR_PROPOSAL_INL_H_
@@ -20,8 +20,6 @@
 #include "./operator_common.h"
 #include "./mshadow_op.h"
 #include "./native_op-inl.h"
-#include "./rcnn_utils.h"
-
 
 // extend NumericalParam
 namespace mxnet {
@@ -122,7 +120,6 @@ enum ProposalOpOutputs {kOut, kScore};
 enum ProposalForwardResource {kTempResource};
 }  // proposal
 
-
 struct ProposalParam : public dmlc::Parameter<ProposalParam> {
   int rpn_pre_nms_top_n;
   int rpn_post_nms_top_n;
@@ -161,184 +158,7 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
 };
 
 template<typename xpu>
-class ProposalOp : public Operator{
- public:
-  explicit ProposalOp(ProposalParam param) {
-    this->param_ = param;
-  }
-
-  virtual void Forward(const OpContext &ctx,
-                       const std::vector<TBlob> &in_data,
-                       const std::vector<OpReqType> &req,
-                       const std::vector<TBlob> &out_data,
-                       const std::vector<TBlob> &aux_states) {
-    using namespace mshadow;
-    using namespace mshadow::expr;
-    CHECK_EQ(in_data.size(), 3);
-    CHECK_EQ(out_data.size(), 2);
-    CHECK_GT(req.size(), 1);
-    CHECK_EQ(req[proposal::kOut], kWriteTo);
-    CHECK_EQ(in_data[proposal::kClsProb].shape_[0], 1) << "Sorry, multiple images each device is not implemented.";
-
-    Stream<xpu> *s = ctx.get_stream<xpu>();
-
-    Shape<4> scores_shape = Shape4(in_data[proposal::kClsProb].shape_[0],
-                                   in_data[proposal::kClsProb].shape_[1] / 2,
-                                   in_data[proposal::kClsProb].shape_[2],
-                                   in_data[proposal::kClsProb].shape_[3]);
-    real_t* foreground_score_ptr = reinterpret_cast<real_t *>(in_data[proposal::kClsProb].dptr_) + scores_shape.Size();
-    Tensor<cpu, 4> scores = Tensor<cpu, 4>(foreground_score_ptr, scores_shape);
-    Tensor<cpu, 4> bbox_deltas = in_data[proposal::kBBoxPred].get<cpu, 4, real_t>(s);
-    Tensor<cpu, 2> im_info = in_data[proposal::kImInfo].get<cpu, 2, real_t>(s);
-
-    Tensor<cpu, 2> out = out_data[proposal::kOut].get<cpu, 2, real_t>(s);
-    Tensor<cpu, 2> out_score = out_data[proposal::kScore].get<cpu, 2, real_t>(s);
-
-    int num_anchors = in_data[proposal::kClsProb].shape_[1] / 2;
-    int height = scores.size(2);
-    int width = scores.size(3);
-    int count = num_anchors * height * width;
-    int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
-    rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
-    int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
-
-    Tensor<cpu, 2> workspace_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(count, 5), s);
-    Tensor<cpu, 2> workspace_ordered_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(rpn_pre_nms_top_n, 5), s);
-    Tensor<cpu, 2> workspace_pre_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(2, count), s);
-    Tensor<cpu, 2> workspace_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(3, rpn_pre_nms_top_n), s);
-
-    // Generate anchors
-    std::vector<float> base_anchor(4);
-    base_anchor[0] = 0.0;
-    base_anchor[1] = 0.0;
-    base_anchor[2] = param_.feature_stride - 1.0;
-    base_anchor[3] = param_.feature_stride - 1.0;
-    CHECK_EQ(num_anchors, param_.ratios.info.size() * param_.scales.info.size());
-    std::vector<float> anchors;
-    utils::GenerateAnchors(base_anchor,
-                           param_.ratios.info,
-                           param_.scales.info,
-                           anchors);
-    std::memcpy(workspace_proposals.dptr_, &anchors[0], sizeof(float) * anchors.size());
-
-    //Enumerate all shifted anchors
-    for (index_t i = 0; i < num_anchors; ++i){
-      for (index_t j = 0; j < height; ++j){
-        for (index_t k = 0; k < width; ++k){
-          index_t index = j * (width * num_anchors) + k * (num_anchors) + i;
-          workspace_proposals[index][0] = workspace_proposals[i][0] + k * param_.feature_stride;
-          workspace_proposals[index][1] = workspace_proposals[i][1] + j * param_.feature_stride;
-          workspace_proposals[index][2] = workspace_proposals[i][2] + k * param_.feature_stride;
-          workspace_proposals[index][3] = workspace_proposals[i][3] + j * param_.feature_stride;
-          workspace_proposals[index][4] = scores[0][i][j][k];
-        }
-      }
-    }
-
-    // prevent padded predictions
-    int real_height = static_cast<int>(im_info[0][0] / param_.feature_stride);
-    int real_width = static_cast<int>(im_info[0][1] / param_.feature_stride);
-    CHECK_GE(height, real_height) << height << " " << real_height << std::endl;
-    CHECK_GE(width, real_width) << width << " " << real_width << std::endl;
-
-    if (param_.iou_loss) {
-      utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1],
-                             real_height, real_width, &(workspace_proposals));
-    } else {
-      utils::BBoxTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1],
-                              real_height, real_width, &(workspace_proposals));
-    }
-    utils::FilterBox(workspace_proposals, param_.rpn_min_size * im_info[0][2]);
-
-    Tensor<cpu, 1> score = workspace_pre_nms[0];
-    Tensor<cpu, 1> order = workspace_pre_nms[1];
-
-    utils::CopyScore(workspace_proposals,
-                     score,
-                     order);
-    utils::ReverseArgsort(score,
-                          order);
-    utils::ReorderProposals(workspace_proposals,
-                            order,
-                            rpn_pre_nms_top_n,
-                            workspace_ordered_proposals);
-
-    index_t out_size = 0;
-    Tensor<cpu, 1> area = workspace_nms[0];
-    Tensor<cpu, 1> suppressed = workspace_nms[1];
-    Tensor<cpu, 1> keep = workspace_nms[2];
-
-    utils::NonMaximumSuppression(workspace_ordered_proposals,
-                                 param_.threshold,
-                                 rpn_post_nms_top_n,
-                                 area,
-                                 suppressed,
-                                 keep,
-                                 &out_size);
-
-    // fill in output rois
-    for (index_t i = 0; i < out.size(0); ++i) {
-      //batch index 0
-      out[i][0] = 0;
-      if (i < out_size) {
-        index_t index = keep[i];
-        for (index_t j = 0; j < 4; ++j) {
-          out[i][j + 1] =  workspace_ordered_proposals[index][j];
-        }
-      } else {
-        index_t index = keep[i % out_size];
-        for (index_t j = 0; j < 4; ++j) {
-          out[i][j + 1] = workspace_ordered_proposals[index][j];
-        }
-      }
-    }
-
-    // fill in output score
-    for (index_t i = 0; i < out_score.size(0); i++) {
-      if (i < out_size) {
-        index_t index = keep[i];
-        out_score[i][0] = workspace_ordered_proposals[index][4];
-      }
-      else {
-        index_t index = keep[i % out_size];
-        out_score[i][0] = workspace_ordered_proposals[index][4];
-      }
-    }
-  }
-
-  virtual void Backward(const OpContext &ctx,
-                        const std::vector<TBlob> &out_grad,
-                        const std::vector<TBlob> &in_data,
-                        const std::vector<TBlob> &out_data,
-                        const std::vector<OpReqType> &req,
-                        const std::vector<TBlob> &in_grad,
-                        const std::vector<TBlob> &aux_states) {
-    using namespace mshadow;
-    using namespace mshadow::expr;
-    CHECK_EQ(in_grad.size(), 3);
-
-    Stream<xpu> *s = ctx.get_stream<xpu>();
-    Tensor<xpu, 4> gscores = in_grad[proposal::kClsProb].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 4> gbbox = in_grad[proposal::kBBoxPred].get<xpu, 4, real_t>(s);
-    Tensor<xpu, 2> ginfo = in_grad[proposal::kImInfo].get<xpu, 2, real_t>(s);
-
-    // can not assume the grad would be zero
-    Assign(gscores, req[proposal::kClsProb], 0);
-    Assign(gbbox, req[proposal::kBBoxPred], 0);
-    Assign(ginfo, req[proposal::kImInfo], 0);
-  }
-
- private:
-  ProposalParam param_;
-};  // class ProposalOp
-
-template<typename xpu>
 Operator *CreateOp(ProposalParam param);
-
 
 #if DMLC_USE_CXX11
 class ProposalProp : public OperatorProperty {
@@ -425,4 +245,57 @@ class ProposalProp : public OperatorProperty {
 #endif  // DMLC_USE_CXX11
 }  // namespace op
 }  // namespace mxnet
+
+//========================
+// Anchor Generation Utils
+//========================
+namespace mxnet {
+namespace op {
+namespace utils {
+
+inline void _MakeAnchor(float w,
+                        float h,
+                        float x_ctr,
+                        float y_ctr,
+                        std::vector<float>& out_anchors) {
+  out_anchors.push_back(x_ctr - 0.5f * (w - 1.0f));
+  out_anchors.push_back(y_ctr - 0.5f * (h - 1.0f));
+  out_anchors.push_back(x_ctr + 0.5f * (w - 1.0f));
+  out_anchors.push_back(y_ctr + 0.5f * (h - 1.0f));
+  out_anchors.push_back(0.0f);
+}
+
+inline void _Transform(float scale,
+                       float ratio,
+                       const std::vector<float>& base_anchor,
+                       std::vector<float>& out_anchors) {
+  float w = base_anchor[2] - base_anchor[1] + 1.0f;
+  float h = base_anchor[3] - base_anchor[1] + 1.0f;
+  float x_ctr = base_anchor[0] + 0.5 * (w - 1.0f);
+  float y_ctr = base_anchor[1] + 0.5 * (h - 1.0f);
+  float size = w * h;
+  float size_ratios = std::floor(size / ratio);
+  float new_w = std::floor(std::sqrt(size_ratios) + 0.5f) * scale;
+  float new_h = std::floor((new_w / scale * ratio) + 0.5f) * scale;
+
+  _MakeAnchor(new_w, new_h, x_ctr,
+             y_ctr, out_anchors);
+}
+
+// out_anchors must have shape (n, 5), where n is ratios.size() * scales.size()
+inline void GenerateAnchors(const std::vector<float>& base_anchor,
+                            const std::vector<float>& ratios,
+                            const std::vector<float>& scales,
+                            std::vector<float>& out_anchors) {
+  for (size_t j = 0; j < ratios.size(); ++j) {
+    for (size_t k = 0; k < scales.size(); ++k) {
+      _Transform(scales[k], ratios[j], base_anchor, out_anchors);
+    }
+  }
+}
+
+}  // namespace utils
+}  // namespace op
+}  // namespace mxnet
+
 #endif  //  MXNET_OPERATOR_PROPOSAL_INL_H_
