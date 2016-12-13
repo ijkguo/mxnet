@@ -34,8 +34,8 @@ inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
         index_t index = h * (widths * anchors) + w * (anchors) + a;
         float width = boxes[index][2] - boxes[index][0] + 1.0;
         float height = boxes[index][3] - boxes[index][1] + 1.0;
-        float ctr_x = boxes[index][0] + 0.5 * width;
-        float ctr_y = boxes[index][1] + 0.5 * height;
+        float ctr_x = boxes[index][0] + 0.5 * (width - 1.0);
+        float ctr_y = boxes[index][1] + 0.5 * (height - 1.0);
 
         float dx = deltas[0][a*4 + 0][h][w];
         float dy = deltas[0][a*4 + 1][h][w];
@@ -47,10 +47,10 @@ inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
         float pred_w = exp(dw) * width;
         float pred_h = exp(dh) * height;
 
-        float pred_x1 = pred_ctr_x - 0.5 * pred_w;
-        float pred_y1 = pred_ctr_y - 0.5 * pred_h;
-        float pred_x2 = pred_ctr_x + 0.5 * pred_w;
-        float pred_y2 = pred_ctr_y + 0.5 * pred_h;
+        float pred_x1 = pred_ctr_x - 0.5 * (pred_w - 1.0);
+        float pred_y1 = pred_ctr_y - 0.5 * (pred_h - 1.0);
+        float pred_x2 = pred_ctr_x + 0.5 * (pred_w - 1.0);
+        float pred_y2 = pred_ctr_y + 0.5 * (pred_h - 1.0);
 
         pred_x1 = std::max(std::min(pred_x1, im_width - 1.0f), 0.0f);
         pred_y1 = std::max(std::min(pred_y1, im_height - 1.0f), 0.0f);
@@ -294,14 +294,19 @@ class ProposalOp : public Operator{
     rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
     int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
 
-    Tensor<cpu, 2> workspace_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(count, 5), s);
-    Tensor<cpu, 2> workspace_ordered_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(rpn_pre_nms_top_n, 5), s);
-    Tensor<cpu, 2> workspace_pre_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(2, count), s);
-    Tensor<cpu, 2> workspace_nms = ctx.requested[proposal::kTempResource].get_space<cpu>(
-      Shape2(3, rpn_pre_nms_top_n), s);
+    int workspace_size = count * 5 + 2 * count + rpn_pre_nms_top_n * 5 + 3 * rpn_pre_nms_top_n;
+    Tensor<cpu, 1> workspace = ctx.requested[proposal::kTempResource].get_space<cpu>(
+      Shape1(workspace_size), s);
+    int start = 0;
+    Tensor<cpu, 2> workspace_proposals(workspace.dptr_ + start, Shape2(count, 5));
+    start += count * 5;
+    Tensor<cpu, 2> workspace_pre_nms(workspace.dptr_ + start, Shape2(2, count));
+    start += 2 * count;
+    Tensor<cpu, 2> workspace_ordered_proposals(workspace.dptr_ + start, Shape2(rpn_pre_nms_top_n, 5));
+    start += rpn_pre_nms_top_n * 5;
+    Tensor<cpu, 2> workspace_nms(workspace.dptr_ + start, Shape2(3, rpn_pre_nms_top_n));
+    start += 3 * rpn_pre_nms_top_n;
+    CHECK_EQ(workspace_size, start) << workspace_size << " " << start << std::endl;
 
     // Generate anchors
     std::vector<float> base_anchor(4);
@@ -363,6 +368,7 @@ class ProposalOp : public Operator{
     Tensor<cpu, 1> area = workspace_nms[0];
     Tensor<cpu, 1> suppressed = workspace_nms[1];
     Tensor<cpu, 1> keep = workspace_nms[2];
+    suppressed = 0;  // surprised!
 
     utils::NonMaximumSuppression(workspace_ordered_proposals,
                                  param_.threshold,
