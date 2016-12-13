@@ -490,11 +490,11 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // argsort score, save order
-    thrust::sort_by_key(thrust::device,
-                        score.dptr_,
-                        score.dptr_ + score.size(0),
-                        order.dptr_,
-                        thrust::greater<real_t>());
+    thrust::stable_sort_by_key(thrust::device,
+                               score.dptr_,
+                               score.dptr_ + score.size(0),
+                               order.dptr_,
+                               thrust::greater<real_t>());
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // Reorder proposals according to order
