@@ -117,6 +117,50 @@ __global__ void BBoxPredKernel(const int count,
   }
 }
 
+// boxes are (h * w * anchor, 5)
+// deltas are (b, 4 * anchor, h, w)
+// out_pred_boxes are (h * w * anchor, 5)
+// count should be total anchors numbers, h * w * anchors
+// in-place write: boxes and out_pred_boxes are the same location
+template<typename Dtype>
+__global__ void IoUPredKernel(const int count,
+                              const int num_anchors,
+                              const int feat_height,
+                              const int feat_width,
+                              const float im_height,
+                              const float im_width,
+                              const Dtype* boxes,
+                              const Dtype* deltas,
+                              Dtype* out_pred_boxes) {
+  for (int index = blockIdx.x * blockDim.x + threadIdx.x;
+       index < count;
+       index += blockDim.x * gridDim.x) {
+    int a = index % num_anchors;
+    int w = (index / num_anchors) % feat_width;
+    int h = index / num_anchors / feat_width;
+
+    float x1 = boxes[index * 5 + 0];
+    float y1 = boxes[index * 5 + 1];
+    float x2 = boxes[index * 5 + 2];
+    float y2 = boxes[index * 5 + 3];
+
+    float dx1 = deltas[((a * 4) * feat_height + h) * feat_width + w];
+    float dy1 = deltas[((a * 4 + 1) * feat_height + h) * feat_width + w];
+    float dx2 = deltas[((a * 4 + 2) * feat_height + h) * feat_width + w];
+    float dy2 = deltas[((a * 4 + 3) * feat_height + h) * feat_width + w];
+
+    float pred_x1 = max(min(x1 + dx1, im_width - 1.0f), 0.0f);
+    float pred_y1 = max(min(y1 + dy1, im_height - 1.0f), 0.0f);
+    float pred_x2 = max(min(x2 + dx2, im_width - 1.0f), 0.0f);
+    float pred_y2 = max(min(y2 + dy2, im_height - 1.0f), 0.0f);
+
+    out_pred_boxes[index * 5 + 0] = pred_x1;
+    out_pred_boxes[index * 5 + 1] = pred_y1;
+    out_pred_boxes[index * 5 + 2] = pred_x2;
+    out_pred_boxes[index * 5 + 3] = pred_y2;
+  }
+}
+
 // filter box with stride less than rpn_min_size
 // filter: set score to zero
 // dets (n, 5)
@@ -334,6 +378,7 @@ class ProposalGPUOp : public Operator{
     CHECK_EQ(out_data.size(), 2);
     CHECK_GT(req.size(), 1);
     CHECK_EQ(req[proposal::kOut], kWriteTo);
+    CHECK_EQ(in_data[proposal::kClsProb].shape_[0], 1) << "Sorry, multiple images each device is not implemented.";
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
@@ -353,6 +398,9 @@ class ProposalGPUOp : public Operator{
     int height = scores.size(2);
     int width = scores.size(3);
     int count = num_anchors * height * width;  // count of total anchors
+    int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;  // set to -1 for max
+    rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
+    int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
 
     // Generate first anchors based on base anchor
     std::vector<float> base_anchor(4);
@@ -392,9 +440,15 @@ class ProposalGPUOp : public Operator{
 
     // Transform anchors and bbox_deltas into bboxes
     CheckLaunchParam(dimGrid, dimBlock, "BBoxPred");
-    BBoxPredKernel<<<dimGrid, dimBlock>>>(
-      count, num_anchors, height, width, cpu_im_info[0], cpu_im_info[1],
-      workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
+    if (param_.iou_loss) {
+      IoUPredKernel<<<dimGrid, dimBlock>>>(
+        count, num_anchors, height, width, cpu_im_info[0], cpu_im_info[1],
+        workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
+    } else {
+      BBoxPredKernel<<<dimGrid, dimBlock>>>(
+        count, num_anchors, height, width, cpu_im_info[0], cpu_im_info[1],
+        workspace_proposals.dptr_, bbox_deltas.dptr_, workspace_proposals.dptr_);
+    }
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // filter boxes with less than rpn_min_size
@@ -408,7 +462,7 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaMalloc(&score_ptr, sizeof(float) * count));
     Tensor<xpu, 1> score(score_ptr, Shape1(count));
     int* order_ptr = NULL;
-        FRCNN_CUDA_CHECK(cudaMalloc(&order_ptr, sizeof(int) * count));
+    FRCNN_CUDA_CHECK(cudaMalloc(&order_ptr, sizeof(int) * count));
     Tensor<xpu, 1, int> order(order_ptr, Shape1(count));
 
     CheckLaunchParam(dimGrid, dimBlock, "CopyScore");
@@ -425,8 +479,6 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // Reorder proposals according to order
-    int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;  // set to -1 for max
-    rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
     float* workspace_ordered_proposals_ptr = NULL;
     FRCNN_CUDA_CHECK(cudaMalloc(&workspace_ordered_proposals_ptr, sizeof(float) * rpn_pre_nms_top_n * 5));
     Tensor<xpu, 2> workspace_ordered_proposals(workspace_ordered_proposals_ptr, Shape2(rpn_pre_nms_top_n, 5));
@@ -456,11 +508,10 @@ class ProposalGPUOp : public Operator{
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 
     // copy results after nms
-    int post_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
-    dimGrid.x = (post_top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
+    dimGrid.x = (rpn_post_nms_top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
     CheckLaunchParam(dimGrid, dimBlock, "PrepareOutput");
     PrepareOutput<<<dimGrid, dimBlock>>>(
-      post_top_n, workspace_ordered_proposals.dptr_, keep, out_size,
+      rpn_post_nms_top_n, workspace_ordered_proposals.dptr_, keep, out_size,
       out.dptr_, out_score.dptr_);
     FRCNN_CUDA_CHECK(cudaPeekAtLastError());
 

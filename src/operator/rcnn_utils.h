@@ -70,9 +70,12 @@ namespace mxnet {
 namespace op {
 namespace utils {
 
+// bbox prediction and clip to the image borders
 inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
-                      const mshadow::Tensor<cpu, 4>& deltas,
-                      mshadow::Tensor<cpu, 2> *out_pred_boxes) {
+                             const mshadow::Tensor<cpu, 4>& deltas,
+                             const float im_height,
+                             const float im_width,
+                             mshadow::Tensor<cpu, 2> *out_pred_boxes) {
   CHECK_GE(boxes.size(1), 4);
   CHECK_GE(out_pred_boxes->size(1), 4);
   size_t anchors = deltas.size(1)/4;
@@ -98,28 +101,84 @@ inline void BBoxTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
         float pred_w = exp(dw) * width;
         float pred_h = exp(dh) * height;
 
-        (*out_pred_boxes)[index][0] = pred_ctr_x - 0.5 * pred_w;
-        (*out_pred_boxes)[index][1] = pred_ctr_y - 0.5 * pred_h;
-        (*out_pred_boxes)[index][2] = pred_ctr_x + 0.5 * pred_w;
-        (*out_pred_boxes)[index][3] = pred_ctr_y + 0.5 * pred_h;
+        float pred_x1 = pred_ctr_x - 0.5 * pred_w;
+        float pred_y1 = pred_ctr_y - 0.5 * pred_h;
+        float pred_x2 = pred_ctr_x + 0.5 * pred_w;
+        float pred_y2 = pred_ctr_y + 0.5 * pred_h;
+
+        pred_x1 = std::max(std::min(pred_x1, im_width - 1.0f), 0.0f);
+        pred_y1 = std::max(std::min(pred_y1, im_height - 1.0f), 0.0f);
+        pred_x2 = std::max(std::min(pred_x2, im_width - 1.0f), 0.0f);
+        pred_y2 = std::max(std::min(pred_y2, im_height - 1.0f), 0.0f);
+
+        (*out_pred_boxes)[index][0] = pred_x1;
+        (*out_pred_boxes)[index][1] = pred_y1;
+        (*out_pred_boxes)[index][2] = pred_x2;
+        (*out_pred_boxes)[index][3] = pred_y2;
       }
     }
   }
 }
 
-inline void ClipBoxes(const mshadow::Shape<2>& im_shape, mshadow::Tensor<cpu, 2> *in_out_boxes) {
-  CHECK_GE(in_out_boxes->size(1), 4);
-  size_t num_boxes = in_out_boxes->size(0);
+// iou prediction and clip to the image border
+inline void IoUTransformInv(const mshadow::Tensor<cpu, 2>& boxes,
+                            const mshadow::Tensor<cpu, 4>& deltas,
+                            const float im_height,
+                            const float im_width,
+                            mshadow::Tensor<cpu, 2> *out_pred_boxes) {
+  CHECK_GE(boxes.size(1), 4);
+  CHECK_GE(out_pred_boxes->size(1), 4);
+  size_t anchors = deltas.size(1)/4;
+  size_t heights = deltas.size(2);
+  size_t widths = deltas.size(3);
 
-  for (size_t i=0; i < num_boxes; ++i) {
-    (*in_out_boxes)[i][0] = std::max(std::min((*in_out_boxes)[i][0],
-          static_cast<float> (im_shape[1] - 1)), static_cast<float>(0));
-    (*in_out_boxes)[i][1] = std::max(std::min((*in_out_boxes)[i][1],
-          static_cast<float> (im_shape[0] - 1)), static_cast<float>(0));
-    (*in_out_boxes)[i][2] = std::max(std::min((*in_out_boxes)[i][2],
-          static_cast <float>(im_shape[1] - 1)), static_cast<float>(0));
-    (*in_out_boxes)[i][3] = std::max(std::min((*in_out_boxes)[i][3],
-          static_cast <float>(im_shape[0] - 1)), static_cast<float>(0));
+  for (size_t a = 0; a < anchors; ++a) {
+    for (size_t h = 0; h < heights; ++h) {
+      for (size_t w = 0; w < widths; ++w) {
+        index_t index = h * (widths * anchors) + w * (anchors) + a;
+        float x1 = boxes[index][0];
+        float y1 = boxes[index][1];
+        float x2 = boxes[index][2];
+        float y2 = boxes[index][3];
+
+        float dx1 = deltas[0][a * 4 + 0][h][w];
+        float dy1 = deltas[0][a * 4 + 1][h][w];
+        float dx2 = deltas[0][a * 4 + 2][h][w];
+        float dy2 = deltas[0][a * 4 + 3][h][w];
+
+        float pred_x1 = x1 + dx1;
+        float pred_y1 = y1 + dy1;
+        float pred_x2 = x2 + dx2;
+        float pred_y2 = y2 + dy2;
+
+        pred_x1 = std::max(std::min(pred_x1, im_width - 1.0f), 0.0f);
+        pred_y1 = std::max(std::min(pred_y1, im_height - 1.0f), 0.0f);
+        pred_x2 = std::max(std::min(pred_x2, im_width - 1.0f), 0.0f);
+        pred_y2 = std::max(std::min(pred_y2, im_height - 1.0f), 0.0f);
+
+        (*out_pred_boxes)[index][0] = pred_x1;
+        (*out_pred_boxes)[index][1] = pred_y1;
+        (*out_pred_boxes)[index][2] = pred_x2;
+        (*out_pred_boxes)[index][3] = pred_y2;
+      }
+    }
+  }
+}
+
+// filter box by set confidence to zero
+// * height or width < rpn_min_size
+inline void FilterBox(mshadow::Tensor<cpu, 2>& dets,
+                      const float min_size) {
+  for (index_t i = 0; i < dets.size(0); i++) {
+    float iw = dets[i][2] - dets[i][0] + 1.0f;
+    float ih = dets[i][3] - dets[i][1] + 1.0f;
+    if (iw < min_size || ih < min_size) {
+      dets[i][0] -= min_size / 2;
+      dets[i][1] -= min_size / 2;
+      dets[i][2] += min_size / 2;
+      dets[i][3] += min_size / 2;
+      dets[i][4] = -1.0f;
+    }
   }
 }
 
@@ -143,18 +202,6 @@ struct ReverseArgsortCompl {
             val_[static_cast<index_t>(j)]);
   }
 };
-
-// filter box by set confidence to zero
-inline void FilterBox(mshadow::Tensor<cpu, 2>& dets,
-                      const float min_size) {
-  for (index_t i = 0; i < dets.size(0); i++) {
-    float iw = dets[i][2] - dets[i][0] + 1.0f;
-    float ih = dets[i][3] - dets[i][1] + 1.0f;
-    if (iw < min_size || ih < min_size) {
-      dets[i][4] = 0.0f;
-    }
-  }
-}
 
 // copy score and init order
 inline void CopyScore(const mshadow::Tensor<cpu, 2>& dets,
@@ -191,7 +238,6 @@ inline void ReorderProposals(const mshadow::Tensor<cpu, 2>& prev_dets,
 // greedily keep the max detections (already sorted)
 inline void NonMaximumSuppression(const mshadow::Tensor<cpu, 2>& dets,
                                   const float thresh,
-                                  const float min_size,
                                   const index_t post_nms_top_n,
                                   mshadow::Tensor<cpu, 1>& area,
                                   mshadow::Tensor<cpu, 1>& suppressed,

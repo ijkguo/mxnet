@@ -132,6 +132,7 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
   NumericalParam<float> ratios;
   int feature_stride;
   bool output_score;
+  bool iou_loss;
   DMLC_DECLARE_PARAMETER(ProposalParam) {
     float tmp[] = {0, 0, 0, 0};
     DMLC_DECLARE_FIELD(rpn_pre_nms_top_n).set_default(6000)
@@ -154,6 +155,8 @@ struct ProposalParam : public dmlc::Parameter<ProposalParam> {
               "for example the product of all stride's prior to this layer.");
     DMLC_DECLARE_FIELD(output_score).set_default(false)
     .describe("Add score to outputs");
+    DMLC_DECLARE_FIELD(iou_loss).set_default(false)
+    .describe("Usage of IoU Loss");
   }
 };
 
@@ -175,6 +178,7 @@ class ProposalOp : public Operator{
     CHECK_EQ(out_data.size(), 2);
     CHECK_GT(req.size(), 1);
     CHECK_EQ(req[proposal::kOut], kWriteTo);
+    CHECK_EQ(in_data[proposal::kClsProb].shape_[0], 1) << "Sorry, multiple images each device is not implemented.";
 
     Stream<xpu> *s = ctx.get_stream<xpu>();
 
@@ -190,11 +194,13 @@ class ProposalOp : public Operator{
     Tensor<cpu, 2> out = out_data[proposal::kOut].get<cpu, 2, real_t>(s);
     Tensor<cpu, 2> out_score = out_data[proposal::kScore].get<cpu, 2, real_t>(s);
 
-    index_t num_anchors = in_data[proposal::kClsProb].shape_[1] / 2;
-    index_t height = scores.size(2);
-    index_t width = scores.size(3);
-    index_t count = num_anchors * height * width;
-    index_t rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
+    int num_anchors = in_data[proposal::kClsProb].shape_[1] / 2;
+    int height = scores.size(2);
+    int width = scores.size(3);
+    int count = num_anchors * height * width;
+    int rpn_pre_nms_top_n = (param_.rpn_pre_nms_top_n > 0) ? param_.rpn_pre_nms_top_n : count;
+    rpn_pre_nms_top_n = std::min(rpn_pre_nms_top_n, count);
+    int rpn_post_nms_top_n = std::min(param_.rpn_post_nms_top_n, rpn_pre_nms_top_n);
 
     Tensor<cpu, 2> workspace_proposals = ctx.requested[proposal::kTempResource].get_space<cpu>(
       Shape2(count, 5), s);
@@ -233,8 +239,12 @@ class ProposalOp : public Operator{
       }
     }
 
-    utils::BBoxTransformInv(workspace_proposals, bbox_deltas, &(workspace_proposals));
-    utils::ClipBoxes(Shape2(im_info[0][0],im_info[0][1]), &(workspace_proposals));
+    if (param_.iou_loss) {
+      utils::IoUTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1], &(workspace_proposals));
+    } else {
+      utils::BBoxTransformInv(workspace_proposals, bbox_deltas, im_info[0][0], im_info[0][1], &(workspace_proposals));
+    }
+    utils::FilterBox(workspace_proposals, param_.rpn_min_size * im_info[0][2]);
 
     Tensor<cpu, 1> score = workspace_pre_nms[0];
     Tensor<cpu, 1> order = workspace_pre_nms[1];
@@ -249,7 +259,6 @@ class ProposalOp : public Operator{
                             rpn_pre_nms_top_n,
                             workspace_ordered_proposals);
 
-    real_t scale = im_info[0][2];
     index_t out_size = 0;
     Tensor<cpu, 1> area = workspace_nms[0];
     Tensor<cpu, 1> suppressed = workspace_nms[1];
@@ -257,8 +266,7 @@ class ProposalOp : public Operator{
 
     utils::NonMaximumSuppression(workspace_ordered_proposals,
                                  param_.threshold,
-                                 param_.rpn_min_size * scale,
-                                 param_.rpn_post_nms_top_n,
+                                 rpn_post_nms_top_n,
                                  area,
                                  suppressed,
                                  keep,
@@ -347,7 +355,7 @@ class ProposalProp : public OperatorProperty {
     SHAPE_ASSIGN_CHECK(*in_shape, proposal::kBBoxPred,
                        bbox_pred_shape);
     Shape<2> im_info_shape;
-    im_info_shape = Shape2(1, 3);
+    im_info_shape = Shape2(dshape[0], 3);
     SHAPE_ASSIGN_CHECK(*in_shape, proposal::kImInfo, im_info_shape);
     out_shape->clear();
     // output
