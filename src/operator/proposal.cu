@@ -307,6 +307,7 @@ void _nms(const mshadow::Tensor<gpu, 2>& boxes,
                                   nms_overlap_thresh,
                                   boxes_dev,
                                   mask_dev);
+  FRCNN_CUDA_CHECK(cudaPeekAtLastError());
   std::vector<unsigned long long> mask_host(boxes_num * col_blocks);
   FRCNN_CUDA_CHECK(cudaMemcpy(&mask_host[0],
                               mask_dev,
@@ -430,10 +431,8 @@ class ProposalGPUOp : public Operator{
     float* workspace_proposals_ptr = NULL;
     FRCNN_CUDA_CHECK(cudaMalloc(&workspace_proposals_ptr, sizeof(float) * count * 5));
     Tensor<xpu, 2> workspace_proposals(workspace_proposals_ptr, Shape2(count, 5));
-
-    cudaMemcpy(workspace_proposals.dptr_, &anchors[0], sizeof(float) * anchors.size(),
-      cudaMemcpyHostToDevice);
-    FRCNN_CUDA_CHECK(cudaPeekAtLastError());
+    FRCNN_CUDA_CHECK(cudaMemcpy(workspace_proposals.dptr_, &anchors[0], sizeof(float) * anchors.size(),
+      cudaMemcpyHostToDevice));
 
     // Copy proposals to a mesh grid
     dim3 dimGrid((count + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock);
@@ -446,8 +445,7 @@ class ProposalGPUOp : public Operator{
 
     // im_info is small, we want to copy them to cpu
     std::vector<float> cpu_im_info(3);
-    cudaMemcpy(&cpu_im_info[0], im_info.dptr_, sizeof(float) * cpu_im_info.size(), cudaMemcpyDeviceToHost);
-    FRCNN_CUDA_CHECK(cudaPeekAtLastError());
+    FRCNN_CUDA_CHECK(cudaMemcpy(&cpu_im_info[0], im_info.dptr_, sizeof(float) * cpu_im_info.size(), cudaMemcpyDeviceToHost));
 
     // prevent padded predictions
     int real_height = static_cast<int>(cpu_im_info[0] / param_.feature_stride);
@@ -523,8 +521,7 @@ class ProposalGPUOp : public Operator{
     // copy nms result to gpu
     int* keep;
     FRCNN_CUDA_CHECK(cudaMalloc(&keep, sizeof(int) * _keep.size()));
-    cudaMemcpy(keep, &_keep[0], sizeof(int) * _keep.size(), cudaMemcpyHostToDevice);
-    FRCNN_CUDA_CHECK(cudaPeekAtLastError());
+    FRCNN_CUDA_CHECK(cudaMemcpy(keep, &_keep[0], sizeof(int) * _keep.size(), cudaMemcpyHostToDevice));
 
     // copy results after nms
     dimGrid.x = (rpn_post_nms_top_n + kMaxThreadsPerBlock - 1) / kMaxThreadsPerBlock;
